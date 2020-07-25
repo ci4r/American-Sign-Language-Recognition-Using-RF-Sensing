@@ -1,0 +1,104 @@
+clear; clc; close all;
+
+% DATA_DIR = 'C:\Users\ekurtoglu\Desktop\ASL All Outputs\Native\77 GHz\microDoppler No MTI 65x65\Gray\'; 
+% DATA_DIR = 'C:\Users\ekurtoglu\Desktop\ASL All Outputs\Native\77 GHz\microDoppler No MTI 201x451\Gray\Cropped\';
+% DATA_DIR = 'C:\Users\ekurtoglu\Desktop\ASL All Outputs\Native\77 GHz\microDoppler After MTI 65x65\Gray\';
+DATA_DIR = 'C:\Users\mrahman17\Desktop\77 GHz\output_77_20\Exp1\microDoppler Spect Size\';
+% DATA_DIR = 'C:\Users\ekurtoglu\Desktop\ASL All Outputs\Native\24 GHz\Front\Gray\';
+% DATA_DIR = 'C:\Users\ekurtoglu\Desktop\ASL All Outputs\Native\10 GHz\microDoppler\Front\Gray\';
+% DATA_DIR = 'C:\Users\ekurtoglu\Desktop\ASL All Outputs\Native\10 GHz\microDoppler\Corner\Gray\';
+% DATA_DIR = 'C:\Users\ekurtoglu\Desktop\ASL All Outputs\Native\10 GHz\microDoppler\Side\Gray\';
+%% Select savepath
+% savepath = 'C:\Users\mrahman17\Desktop\Genetic Algorithm\Results\ASL\77 GHz\No MTI resize201x451 to 65x65\';
+% savepath = 'C:\Users\mrahman17\Desktop\Genetic Algorithm\Results\ASL\77 GHz\No MTI 65x65\';    
+% savepath = 'C:\Users\mrahman17\Desktop\Genetic Algorithm\Results\ASL\77 GHz\After MTI 65x65\';
+savepath = 'C:\Users\mrahman17\Desktop\Genetic Algorithm\Results\ASL\77 GHz\Spect size orig 65x65\';
+% savepath = 'C:\Users\mrahman17\Desktop\Genetic Algorithm\Results\ASL\24 GHz\';
+% savepath = 'C:\Users\mrahman17\Desktop\Genetic Algorithm\Results\ASL\10 GHz\Front\';
+% savepath = 'C:\Users\mrahman17\Desktop\Genetic Algorithm\Results\ASL\10 GHz\Corner\';
+% savepath = 'C:\Users\mrahman17\Desktop\Genetic Algorithm\Results\ASL\10 GHz\Side\';
+
+
+files = dir(DATA_DIR);
+dirFlags = [files.isdir];
+subFolders = files(dirFlags);
+subFolders = subFolders(3:end);
+for k = 1 : length(subFolders)
+  fprintf('Sub folder #%d = %s\n', k, subFolders(k).name);
+end
+
+num_class = 20;%length(subFolders);
+spects = cell(num_class,1);
+
+for j=1:num_class
+    pattern = strcat(subFolders(j).folder,'\',subFolders(j).name,'\', '*.png');    % file pattern
+    files = dir(pattern);
+    w = waitbar(0);
+    
+    I_MAX = numel(files); % # of files in "files" 
+    
+    for i = 1:I_MAX   
+        msg = strcat('Processing file ', int2str(i), ' of ', int2str(I_MAX), ' Folder ', int2str(j));   % loading message
+        waitbar(i/I_MAX, w, msg);
+        disp(msg);
+        fName = files(i).name;
+        spects{j,i} = imresize(rgb2gray(imread(strcat(pattern(1:end-5),fName))),[65 65]); % [height width], [64 120] Gait, [450 100] ASL
+    end
+    close(w);
+end
+%% Parameters
+
+num_epochs = 100;
+J = 5; % # of cepstral coefficients
+M = 5; % # of filters
+K = size(spects{1,1},1); % length of each filter
+nvars = 3*M; % start, max, stop point of the filter
+prf = 3200;
+%% Constraints
+b = zeros(20,1);
+A = zeros(20,nvars);
+
+for i = 0:4
+    A(4*i+1, 3*i + 1) = 1;
+    A(4*i+1, 3*i + 2) = -1;
+    A(4*i+2, 3*i + 2) = 1;
+    A(4*i+2, 3*i + 3) = -1;
+    % Upper & Lower Bounds
+    A(4*i+3, 3*i + 1) = -1;
+    A(4*i+4, 3*i + 3) = 1;
+    b(4*i+3:4*i+4, 1) = prf/2-1;
+end
+%% Run Genetic Algorithm
+InitPop = [linspace(-prf/5,prf/5,nvars); linspace(-prf/6,prf/6,nvars); linspace(-prf/7,prf/7,nvars)];
+FitFnc = @(f)(myFitness_SVM(f,spects,num_class,J,M,K,prf,num_epochs));
+clear global
+global Gen_Hist
+options = optimoptions(@ga,'PlotFcn',{@gaplotbestf,@myPlotGA},...%@myPlot_filterbank_v2},...% 'OutputFcn',{@myOut_history},...
+    'Display','iter','MaxGenerations',30, 'FitnessLimit', -1, 'PopulationSize',128);%, 'InitialPopulationMatrix',InitPop);
+tic
+[f,fval] = ga(FitFnc,nvars,A,b,[],[],[],[],[],options); % return optimal values for fbank and optimum value
+elapsedTime = toc;
+
+accuracy = 0;
+index = 0;
+for i=1:length(Gen_Hist)
+    if str2double(Gen_Hist(i).Acc) >= accuracy
+        accuracy = str2double(Gen_Hist(i).Acc);
+        index = i;
+    end
+end
+best_param = Gen_Hist(index).Elites;
+
+[H,freq] = Generic_filterbank_v3(M,best_param,prf,K);
+
+figure;
+plot(freq, H);
+title(['Optimized Filterbank with accuracy of ', num2str(accuracy,'%3.1f'), '% ', ' for ', int2str(num_class), ' classes']);
+xlabel(['Frequency (Hz) / Elapsed Time = ', int2str(elapsedTime/3600), ...
+    ' hours ', int2str(mod(elapsedTime/60,60)), ' minutes '])
+savename = strcat(savepath,int2str(num_class),'_class_','filterbank_param.mat');
+save(savename,'best_param','accuracy');
+
+
+
+
