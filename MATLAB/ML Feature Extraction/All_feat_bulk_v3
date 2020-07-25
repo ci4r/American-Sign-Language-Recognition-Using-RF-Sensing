@@ -1,0 +1,124 @@
+clear; clc; close all; warning off
+
+%% Choose Dataset
+masterdata = '/mnt/HDD01/rspl-admin /ASL All Outputs/Native/';
+master_param = '/mnt/HDD01/rspl-admin /All Features Scripts/Filter Params/';
+
+datapath = {[masterdata, '10 GHz/microDoppler/Corner/Gray'], [masterdata, '10 GHz/microDoppler/Front/Gray'], [masterdata, '10 GHz/microDoppler/Side/Gray'],...
+        [masterdata, '24 GHz/Front/Gray'], [masterdata, '77 GHz/microDoppler After MTI 65x65/Gray'], [masterdata, '77 GHz/microDoppler No MTI 65x65/Gray'],...
+        [masterdata, '77 GHz/microDoppler No MTI 201x451/Gray/Cropped']};
+param_path = {'10 GHz/Corner/','10 GHz/Front/','10 GHz/Side/','24 GHz/','77 GHz/After MTI 65x65/','77 GHz/No MTI 65x65/','77 GHz/No MTI resize 201x451 to 65x65/'};
+num_classes = [20];   
+accuracy_hist = zeros(length(datapath),length(num_classes)); % accuracy history
+selected_features = cell(length(datapath),length(num_classes));
+dataset_hist = cell(length(datapath), length(num_classes));
+labels_onehot = cell(length(datapath), length(num_classes));
+labels_int_hist = cell(length(datapath), length(num_classes));
+%% Parameters
+M = 5; % # of filters
+num_dct = 500; % # of DCT coefficients
+num_lpc = 100; % The order of an LPC model is the number of poles, p, or formants in the filter. # of lpc coeff = p^2
+% GAFWCC params
+prf = 3200; % pulse repetition frequency
+J = 5; % # of GAFWCC coefficients                
+for ii = 1:length(datapath)
+        DATA_DIR = datapath{ii};
+        files = dir(DATA_DIR);
+        dirFlags = [files.isdir];
+        subFolders = files(dirFlags);
+        subFolders = subFolders(3:end);
+        % for k = 1 : length(subFolders)
+        %   fprintf('Sub folder #%d = %s\n', k, subFolders(k).name);
+        % end
+        for jj = 1:length(num_classes)
+                %% Load Data
+                clear labels_int dataset labels
+                num_class = num_classes(jj);
+                spects = cell(num_class,1);
+                filter_file = strcat(master_param, param_path(ii), int2str(num_classes(jj)), '_class_filterbank_param.mat');
+                f_params = load(filter_file{1,1});
+                for j=1:num_class
+                        pattern = strcat(subFolders(j).folder,'/',subFolders(j).name,'/', '*.png');    % file pattern
+                        files = dir(pattern);
+                        
+                        I_MAX = numel(files); % # of files in "files"
+                        
+                        for i = 1:8%I_MAX
+%                                 msg = strcat('Processing file ', int2str(i), ' of ', int2str(I_MAX), ' Folder ', int2str(j));   % loading message
+%                                 disp(msg);
+                                fName = files(i).name;
+                                spects{j,i} = rescale(im2double(imresize(rgb2gray(imread(strcat(pattern(1:end-5),fName))),[65 65])),1,256); % [height width], [64 120] Gait, [450 100] ASL
+                        end
+                end
+                %% Extract Features
+                sample = 1;
+                
+                K = size(spects{1,1},1); % length of each filter
+
+                
+                [H, freq] = Generic_filterbank_v3(M,f_params.best_param,prf,K); % create the filterbank
+                for j=1:num_class
+                        for i = 1:size(spects,2)
+                                if ~isempty(spects{j,i})
+                                        % DCT
+                                        z = dct2(spects{j,i});
+                                        X_dct = z(:);
+                                        dct_coeffs = X_dct(1:num_dct);
+                                        %LPC
+                                        Q = lpc(spects{j,i}); % 65x(P1+1) lpc returns a model estimate for each column in the rows of matrix
+                                        R = lpc(Q(:,2:end)); % P1x(P2+1)
+                                        X_lpc = reshape(R(:,2:end),[],1);
+                                        lpc_coeffs = X_lpc(1:num_lpc);
+                                        % Envelope Features
+                                        env_feat = env_feat_func(spects{j,i});
+                                        % GAFWCC Features
+                                        S = Log_energy(spects{j,i},H); % calculate log-energy output of each filter
+                                        GA_DCT = dct_coeff(S,J); % cepstral coefficients
+                                        GAFWCC = GA_DCT(:); % vectorize
+                                        
+                                        labels(j,sample) = 1;
+                                        dataset(:,sample) = [env_feat'; dct_coeffs; GAFWCC; lpc_coeffs];
+                                        sample = sample + 1;
+                                end
+                        end
+                end
+                [~, labels_int(1,:)] = max(labels);
+                dataset_hist{ii,jj} = dataset;
+                labels_onehot{ii,jj} = labels;
+                labels_int_hist{ii,jj} = labels_int;
+                
+                trainRatio = 0.75;
+                valRatio = 0;
+                testRatio = 0.25;
+                Q = size(dataset,2);
+                [trainInd,valInd,testInd] = dividerand(Q,trainRatio,valRatio,testRatio);
+                
+                datatrain = dataset(:,trainInd);
+                label_train = labels(:,trainInd);
+                datatest = dataset(:,testInd);
+                label_test = labels(:,testInd);
+                
+                %% Sequential Backward Selection
+                % - criterion value * 100 will give the final accuracy
+                % removed column numbers corresponds to the rows in 'dataset', i.e. features, so we can keep track of the selected features
+%                 opt = statset('display','iter',...
+%                         'TolFun',1e-9,... % Termination tolerance for the objective function value
+%                         'TolTypeFun','rel'); % Use absolute or relative objective function tolerances. The default is 'rel'.
+                opt = statset('display','iter','UseParallel',true);%,...
+%                         'TolFun',1e-9); % final
+                CritFun = @(dataset, labels)(critfun_SVM(dataset,labels, trainInd, testInd));
+                [fs,history] = sequentialfs(CritFun,dataset',labels',...
+                        'cv','none',...
+                        'direction', 'backward',...
+                        'nullmodel',true,... %  indicating whether or not the null model (containing no features from X) should be included in feature selection
+                        'options',opt);
+                
+                final_accuracy = -min(history.Crit)*100;
+                accuracy_hist(ii,jj) = final_accuracy;
+                selected_features{ii,jj} = find(fs); % which features are finally chosen
+                msg = strcat(['Accuracy of dataset ', int2str(ii), ' of ', int2str(length(datapath)), ' | ', int2str(num_classes(jj)), ' class: ', num2str(final_accuracy,'%3.1f'), '%']);   % loading message
+                disp(msg);
+                
+        end
+end
+save('7env_500dct_325fwcc_100lpc_channelwise.mat','labels_int_hist','labels_onehot','dataset_hist','selected_features','accuracy_hist');
