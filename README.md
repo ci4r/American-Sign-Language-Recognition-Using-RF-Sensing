@@ -1,5 +1,5 @@
 # American Sign Language Recognition Using RF Sensing
-Code used to generate results for `American Sign Language Recognition Using RF Sensing` paper
+Code used to generate the results for `American Sign Language Recognition Using RF Sensing` paper.
 
 ### Cite as
 
